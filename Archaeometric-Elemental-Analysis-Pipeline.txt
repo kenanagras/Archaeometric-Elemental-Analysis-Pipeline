@@ -1,0 +1,165 @@
+packages <- c("readxl","dplyr","FactoMineR","factoextra","ggplot2",
+              "RColorBrewer","ggrepel","reshape2","dendextend","GGally","viridis")
+ins <- rownames(installed.packages())
+for(p in packages) if(!(p %in% ins)) install.packages(p, dependencies = TRUE)
+lapply(packages, library, character.only = TRUE)
+
+file_path <- "C:/Users/pc/Input.xlsx"
+
+df <- readxl::read_excel(file_path)
+
+if(!("LocNo" %in% colnames(df))) stop("The ‘LocNo’ column was not found in the data")
+if(is.factor(df$LocNo)) df$LocNo <- as.character(df$LocNo)
+if(is.numeric(df$LocNo)) df$LocNo <- as.character(as.integer(df$LocNo))
+
+target_groups <- as.character(c(1,2,3,4,5)) #If you prefer, you don't have to apply a filter
+df_sub <- df %>% filter(LocNo %in% target_groups)
+if(nrow(df_sub) == 0) stop("None of the selected LocNo groups were found in the data. Please check the LocNo values.")
+
+elements <- c("A","B","C","D","E","F") #Six of them would be fine
+elements <- elements[elements %in% colnames(df_sub)]
+if(length(elements) < 3) stop("At least 3 selected elements must be present in the data. Found:", paste(elements, collapse = ", "))
+
+X_ind <- df_sub %>% select(all_of(elements))
+rownames(X_ind) <- paste0(df_sub$LocNo, "_", seq_len(nrow(df_sub)))
+pca_res <- FactoMineR::PCA(as.data.frame(X_ind), graph = FALSE)
+
+pca_scores <- as.data.frame(pca_res$ind$coord)
+pca_scores$LocNo <- df_sub$LocNo
+pca_scores$ID <- rownames(X_ind)
+
+cov_mat <- cov(pca_scores[, 1:2], use = "pairwise.complete.obs")
+center <- colMeans(pca_scores[, 1:2], na.rm = TRUE)
+mahal <- apply(pca_scores[, 1:2], 1, function(x) mahalanobis(as.numeric(x), center, cov_mat))
+threshold <- qchisq(0.975, df = 2)
+pca_scores$outlier <- mahal > threshold
+
+desktop <- ifelse(.Platform$OS.type == "windows", Sys.getenv("USERPROFILE"), Sys.getenv("HOME"))
+out_pca_csv <- file.path(desktop, "Desktop", "PCA_result_selectedLocNo_individuals.csv")
+if(!dir.exists(dirname(out_pca_csv))) out_pca_csv <- file.path(getwd(), "PCA_result_selectedLocNo_individuals.csv")
+write.csv(pca_scores, out_pca_csv, row.names = FALSE)
+
+df_sub$LocNo <- factor(df_sub$LocNo, levels = unique(target_groups))
+n_groups <- length(levels(df_sub$LocNo))
+if(n_groups <= 9) {
+  pal_groups <- RColorBrewer::brewer.pal(n = n_groups, name = "Set1")
+} else {
+  pal_groups <- viridis::viridis(n_groups)
+}
+names(pal_groups) <- levels(df_sub$LocNo)
+
+library(ggrepel)
+p_non <- subset(pca_scores, outlier == FALSE)
+p_out <- subset(pca_scores, outlier == TRUE)
+
+pca_plot <- ggplot() +
+  geom_point(data = p_non, aes(x = Dim.1, y = Dim.2, fill = LocNo),
+             shape = 21, size = 4, color = "black", stroke = 0.5) +
+  geom_point(data = p_out, aes(x = Dim.1, y = Dim.2, fill = LocNo),
+             shape = 21, size = 5, color = "red", stroke = 1.3) +
+  geom_text_repel(data = pca_scores, aes(x = Dim.1, y = Dim.2, label = LocNo),
+                  size = 3, show.legend = FALSE) +
+  scale_fill_manual(values = pal_groups, name = "LocNo") +
+  labs(title = "PCA",
+       x = paste0("PC1 (", round(pca_res$eig[1,2],1), "%)"),
+       y = paste0("PC2 (", round(pca_res$eig[2,2],1), "%)")) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+print(pca_plot)
+
+library(GGally)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+
+pair_plot <- GGally::ggpairs(
+  df_sub,
+  columns = elements,
+  mapping = ggplot2::aes(color = LocNo, alpha = 0.8),
+  upper = list(continuous = wrap("cor", size = 2.2)),      
+  lower = list(continuous = wrap("points", alpha = 0.7, size = 1.8)),
+  diag = list(continuous = wrap("densityDiag", alpha = 0.4))
+)
+
+pair_plot <- pair_plot +
+  scale_color_manual(values = pal_groups, name = "Pairwise results") +
+  theme_bw(base_size = 9) +
+  theme(
+    legend.position = "none",  
+    strip.text = element_text(size = 9, face = "bold"),
+    axis.text = element_text(size = 7),
+    panel.grid = element_blank()
+  )
+
+legend_data <- data.frame(
+  LocNo = factor(names(pal_groups), levels = names(pal_groups)),
+  x = seq_along(pal_groups),
+  y = rep(1, length(pal_groups))
+)
+
+legend_plot <- ggplot(legend_data, aes(x = x, y = y, color = LocNo)) +
+  geom_point(size = 5) +
+  geom_text(aes(label = LocNo), vjust = -1.2, size = 3, fontface = "bold") +
+  scale_color_manual(values = pal_groups) +
+  theme_void() +
+  theme(legend.position = "none") +
+  ggtitle("Pairwise Grup colors (LocNo)")
+
+pdf(file.path(dirname(out_pca_csv), "Pairwise_PCA_selectedLocNo.pdf"), width = 12, height = 9)
+
+pair_grob <- GGally::ggmatrix_gtable(pair_plot)
+
+gridExtra::grid.arrange(ggplotGrob(legend_plot), pair_grob, ncol = 1, heights = c(1.2, 9))
+
+dev.off()
+
+print(legend_plot)
+print(pair_plot)
+
+group_means <- df_sub %>%
+  group_by(LocNo) %>%
+  summarise(across(all_of(elements), \(x) mean(x, na.rm = TRUE))) %>%
+  ungroup()
+
+group_means$LocNo <- factor(as.character(group_means$LocNo), levels = unique(target_groups))
+group_means <- group_means %>% arrange(factor(LocNo, levels = levels(group_means$LocNo)))
+
+rownames(group_means) <- group_means$LocNo
+X_group <- group_means %>% select(all_of(elements))
+
+dist_group <- dist(scale(X_group), method = "euclidean")
+hc_group <- hclust(dist_group, method = "ward.D2")
+
+k <- min(4, nrow(X_group))
+kcols <- if(k <= 9) RColorBrewer::brewer.pal(k, "Set2") else viridis::viridis(k)
+dend <- as.dendrogram(hc_group)
+dend <- dendextend::color_labels(dend, k = k, col = kcols)
+plot(dend, main = "Dendrogram — grup size", ylab = "Euclidean distance (scaled)")
+
+cor_mat <- cor(X_group, use = "pairwise.complete.obs")
+cor_df <- reshape2::melt(cor_mat, varnames = c("Var1","Var2"), value.name = "r")
+
+heatmap_plot <- ggplot(cor_df, aes(x = Var1, y = Var2, fill = r)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", r)), size = 3) +
+  scale_fill_gradient2(low = "darkblue", mid = "white", high = "darkred", midpoint = 0, limits = c(-1,1), name = "r") +
+  theme_minimal(base_size = 12) +
+  labs(title = "Correlation tile — group means", x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(heatmap_plot)
+
+out_cor_csv <- file.path(dirname(out_pca_csv), "correlation_matrix_groupMeans_selectedElements.csv")
+write.csv(cor_mat, out_cor_csv, row.names = TRUE)
+
+if("2" %in% rownames(X_group)) {
+  ref_vec <- as.numeric(X_group["2", ])
+  dists_to_2 <- apply(X_group, 1, function(r) sqrt(sum((as.numeric(r) - ref_vec)^2)))
+  dists_df <- data.frame(LocNo = rownames(X_group), distance_to_2 = dists_to_2)
+  dists_df <- dists_df %>% arrange(distance_to_2)
+  out_dist_csv <- file.path(dirname(out_pca_csv), "distances_to_LocNo2_groupMeans.csv")
+  write.csv(dists_df, out_dist_csv, row.names = FALSE)
+  message("Distances to LocNo2 CSV saved: ", out_dist_csv)
+  print(dists_df)
+} else {
+  warning("The reference LocNo ‘2’ group could not be found; the distance table has not been created.")
+}
